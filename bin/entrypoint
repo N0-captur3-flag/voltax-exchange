@@ -1,0 +1,20 @@
+#!/usr/bin/env ruby
+
+command = ARGV.first
+
+ENV["RACK_ENV"] ||= "production"
+
+case command
+when "server"
+  exec File.expand_path("server", __dir__)
+when "migrate"
+  exec File.expand_path("migrate", __dir__)
+when "matching-engine"
+  exec File.expand_path("matching-engine", __dir__), *ARGV.drop(1)
+when "market-simulator"
+  exec File.expand_path("market-simulator", __dir__), *ARGV.drop(1)
+when nil
+  exec File.expand_path("server", __dir__)
+else
+  exec(*ARGV)
+end

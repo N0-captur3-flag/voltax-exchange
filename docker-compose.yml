@@ -1,0 +1,80 @@
+services:
+  migrate:
+    build:
+      context: .
+    environment:
+      RACK_ENV: ${RACK_ENV:-production}
+      VOLTAX_SERVICE_NAME: ${VOLTAX_SERVICE_NAME:-voltax-exchange}
+      VOLTAX_SECRET_KEY_BASE: ${VOLTAX_SECRET_KEY_BASE:?set VOLTAX_SECRET_KEY_BASE}
+      VOLTAX_DATABASE_URL: postgres://voltax:${VOLTAX_POSTGRES_PASSWORD:?set VOLTAX_POSTGRES_PASSWORD}@postgres:5432/voltax_development
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  exchange-api:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      RACK_ENV: ${RACK_ENV:-development}
+      VOLTAX_SERVICE_NAME: ${VOLTAX_SERVICE_NAME:-voltax-exchange}
+      VOLTAX_PUBLIC_BASE_URL: ${VOLTAX_PUBLIC_BASE_URL:-http://localhost:9292}
+      VOLTAX_BIND: ${VOLTAX_BIND:-0.0.0.0}
+      VOLTAX_PORT: ${VOLTAX_PORT:-9292}
+      VOLTAX_SECRET_KEY_BASE: ${VOLTAX_SECRET_KEY_BASE:?set VOLTAX_SECRET_KEY_BASE}
+      VOLTAX_DATABASE_URL: postgres://voltax:${VOLTAX_POSTGRES_PASSWORD:?set VOLTAX_POSTGRES_PASSWORD}@postgres:5432/voltax_development
+    command: ["server"]
+    ports:
+      - "8082:9292"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9292/health >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  matching-engine:
+    build:
+      context: .
+    environment:
+      RACK_ENV: ${RACK_ENV:-development}
+      VOLTAX_SERVICE_NAME: ${VOLTAX_SERVICE_NAME:-voltax-exchange}
+      VOLTAX_WORKER_INTERVAL_SECONDS: ${VOLTAX_WORKER_INTERVAL_SECONDS:-1}
+      VOLTAX_SECRET_KEY_BASE: ${VOLTAX_SECRET_KEY_BASE:?set VOLTAX_SECRET_KEY_BASE}
+      VOLTAX_DATABASE_URL: postgres://voltax:${VOLTAX_POSTGRES_PASSWORD:?set VOLTAX_POSTGRES_PASSWORD}@postgres:5432/voltax_development
+    command: ["matching-engine", "loop"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  market-simulator:
+    build:
+      context: .
+    environment:
+      RACK_ENV: ${RACK_ENV:-development}
+      VOLTAX_SERVICE_NAME: ${VOLTAX_SERVICE_NAME:-voltax-exchange}
+      VOLTAX_WORKER_INTERVAL_SECONDS: ${VOLTAX_MARKET_SIMULATOR_INTERVAL_SECONDS:-15}
+      VOLTAX_SECRET_KEY_BASE: ${VOLTAX_SECRET_KEY_BASE:?set VOLTAX_SECRET_KEY_BASE}
+      VOLTAX_DATABASE_URL: postgres://voltax:${VOLTAX_POSTGRES_PASSWORD:?set VOLTAX_POSTGRES_PASSWORD}@postgres:5432/voltax_development
+    command: ["market-simulator", "loop"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: voltax_development
+      POSTGRES_USER: voltax
+      POSTGRES_PASSWORD: ${VOLTAX_POSTGRES_PASSWORD:?set VOLTAX_POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voltax -d voltax_development"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

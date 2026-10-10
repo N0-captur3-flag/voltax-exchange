@@ -1,0 +1,6 @@
+#!/usr/bin/env ruby
+
+ENV["RACK_ENV"] ||= "development"
+ENV["VOLTAX_BIND"] ||= "0.0.0.0"
+
+exec "bundle", "exec", "puma", "-C", "config/puma.rb"

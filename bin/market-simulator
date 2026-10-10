@@ -1,0 +1,118 @@
+#!/usr/bin/env ruby
+
+require "json"
+require "bundler/setup"
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+require "voltax/db"
+require "voltax/money"
+require "voltax/services/market_simulator_service"
+
+ENV["RACK_ENV"] ||= "production"
+
+def env_switch(name, default)
+  value = ENV.fetch(name, default).to_s
+  %w[1 true yes].include?(value.downcase)
+end
+
+def env_integer(name, default)
+  text = ENV.fetch(name, default).to_s
+  raise ArgumentError unless text.match?(/\A\d+\z/)
+
+  Integer(text, 10)
+end
+
+def worker_interval_seconds
+  text = ENV.fetch("VOLTAX_WORKER_INTERVAL_SECONDS", "15").to_s
+  raise ArgumentError unless text.match?(/\A[1-9]\d*\z/)
+
+  Integer(text, 10)
+end
+
+def worker_mode
+  return "loop" if ARGV.include?("loop") || ARGV.include?("--loop")
+
+  ENV.fetch("VOLTAX_WORKER_MODE", "once").to_s
+end
+
+def process_once(tick_index:)
+  VoltaX::DB.with_connection do |database|
+    VoltaX::DB.seed_markets(database: database)
+    result = VoltaX::Services::MarketSimulatorService.new(database: database).run_once(
+      market_symbol: ENV.fetch("VOLTAX_SIMULATOR_MARKET", "VOLT-USDT"),
+      tick_index: tick_index,
+      seed: ENV.fetch("VOLTAX_SIMULATOR_SEED", VoltaX::Services::MarketSimulatorService::DEFAULT_SEED),
+      trigger_conditionals: env_switch("VOLTAX_SIMULATOR_TRIGGER_CONDITIONALS", "1")
+    )
+
+    {
+      process: "market-simulator",
+      status: "ok",
+      mode: "once",
+      market_symbol: result[:tick][:market_symbol],
+      tick_index: result[:tick][:tick_index],
+      price: VoltaX::Money.format(result[:tick][:price]),
+      feed_sequence: result[:feed_event][:sequence],
+      conditional_orders_processed: result[:triggers].length
+    }
+  end
+end
+
+def initial_tick_index
+  return env_integer("VOLTAX_SIMULATOR_TICK", "0") if ENV.key?("VOLTAX_SIMULATOR_TICK")
+
+  VoltaX::DB.with_connection do |database|
+    VoltaX::DB.seed_markets(database: database)
+    VoltaX::Services::MarketSimulatorService.new(database: database).next_tick_index(
+      market_symbol: ENV.fetch("VOLTAX_SIMULATOR_MARKET", "VOLT-USDT"),
+      seed: ENV.fetch("VOLTAX_SIMULATOR_SEED", VoltaX::Services::MarketSimulatorService::DEFAULT_SEED)
+    )
+  end
+end
+
+def run_once
+  puts JSON.generate(process_once(tick_index: ENV.fetch("VOLTAX_SIMULATOR_TICK", "0")))
+end
+
+def run_loop
+  stopping = false
+  Signal.trap("TERM") { stopping = true }
+  Signal.trap("INT") { stopping = true }
+  interval = worker_interval_seconds
+  tick_index = initial_tick_index
+  puts JSON.generate(
+    process: "market-simulator",
+    status: "ok",
+    mode: "loop",
+    event: "started",
+    interval_seconds: interval,
+    tick_index: tick_index
+  )
+  STDOUT.flush
+
+  until stopping
+    begin
+      payload = process_once(tick_index: tick_index).merge(mode: "loop")
+      puts JSON.generate(payload)
+    rescue VoltaX::DB::ConnectionError, ArgumentError
+      warn JSON.generate(process: "market-simulator", status: "error", mode: "loop", tick_index: tick_index, error: "worker_failed")
+    end
+    STDOUT.flush
+    tick_index += 1
+    sleep interval unless stopping
+  end
+  puts JSON.generate(process: "market-simulator", status: "ok", mode: "loop", event: "stopped", next_tick_index: tick_index)
+end
+
+begin
+  case worker_mode
+  when "once"
+    run_once
+  when "loop"
+    run_loop
+  else
+    raise ArgumentError
+  end
+rescue VoltaX::DB::ConnectionError, ArgumentError
+  warn JSON.generate(process: "market-simulator", status: "error", error: "worker_failed")
+  exit 1
+end

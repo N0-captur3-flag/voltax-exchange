@@ -1,0 +1,78 @@
+#!/usr/bin/env ruby
+
+require "json"
+require "bundler/setup"
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+require "voltax/db"
+require "voltax/services/conditional_trigger_service"
+
+ENV["RACK_ENV"] ||= "production"
+
+def worker_interval_seconds
+  text = ENV.fetch("VOLTAX_WORKER_INTERVAL_SECONDS", "1").to_s
+  raise ArgumentError unless text.match?(/\A[1-9]\d*\z/)
+
+  Integer(text, 10)
+end
+
+def worker_mode
+  return "loop" if ARGV.include?("loop") || ARGV.include?("--loop")
+
+  ENV.fetch("VOLTAX_WORKER_MODE", "once").to_s
+end
+
+def process_once
+  VoltaX::DB.with_connection do |database|
+    VoltaX::DB.seed_markets(database: database)
+    results = VoltaX::Services::ConditionalTriggerService.new(database: database).process_from_latest_trades
+
+    {
+      process: "matching-engine",
+      status: "ok",
+      mode: "once",
+      conditional_orders_processed: results.length,
+      feed_events_published: results.count { |result| result[:feed_event] }
+    }
+  end
+end
+
+def run_once
+  puts JSON.generate(process_once)
+end
+
+def run_loop
+  stopping = false
+  Signal.trap("TERM") { stopping = true }
+  Signal.trap("INT") { stopping = true }
+  interval = worker_interval_seconds
+  tick = 0
+  puts JSON.generate(process: "matching-engine", status: "ok", mode: "loop", event: "started", interval_seconds: interval)
+  STDOUT.flush
+
+  until stopping
+    tick += 1
+    begin
+      payload = process_once.merge(mode: "loop", tick: tick)
+      puts JSON.generate(payload)
+    rescue VoltaX::DB::ConnectionError, ArgumentError
+      warn JSON.generate(process: "matching-engine", status: "error", mode: "loop", tick: tick, error: "worker_failed")
+    end
+    STDOUT.flush
+    sleep interval unless stopping
+  end
+  puts JSON.generate(process: "matching-engine", status: "ok", mode: "loop", event: "stopped", ticks: tick)
+end
+
+begin
+  case worker_mode
+  when "once"
+    run_once
+  when "loop"
+    run_loop
+  else
+    raise ArgumentError
+  end
+rescue VoltaX::DB::ConnectionError, ArgumentError
+  warn JSON.generate(process: "matching-engine", status: "error", error: "worker_failed")
+  exit 1
+end

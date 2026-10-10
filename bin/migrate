@@ -1,0 +1,12 @@
+#!/usr/bin/env ruby
+
+ENV["RACK_ENV"] ||= "production"
+
+require_relative "../config/environment"
+require_relative "../lib/voltax/db"
+
+VoltaX::DB.with_connection do |database|
+  VoltaX::DB.migrate(database: database)
+  version = VoltaX::DB.current_version(database: database) || "none"
+  puts "Database migrations complete; version=#{version}"
+end
